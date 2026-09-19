@@ -1,0 +1,116 @@
+# =============================================================================
+# CRYPTO AI — NEW, ISOLATED analysis stack (Portainer)
+# =============================================================================
+# This file is SEPARATE from docker-compose.yml (the OLD Zentry/YAKSHA stack).
+# Nothing here references, depends on, or touches:
+#   the old analysis API, the old Zentry database, royal1-* · AIGuruthuma · Autopost
+#   · portainer · mega99-signal-bot
+#
+# Every name is new and unique, so no "container name already in use" conflict:
+#   containers : crypto-ai-postgres, crypto-ai-api
+#   network    : crypto-ai-network
+#   volumes    : crypto_ai_postgres_data, crypto_ai_logs
+#
+# PORTS
+#   PostgreSQL : NO host port published — reachable only inside crypto-ai-network.
+#                (Host 5432 stays owned by the OLD Zentry database container.)
+#   FastAPI    : host 8010 -> container 8000  (host 8000 stays owned by the OLD
+#                analysis API container). The engine listens on 8000 inside.
+#
+# SECRETS
+#   No secret is hardcoded. POSTGRES_PASSWORD, DATABASE_URL and ANALYSIS_API_KEY
+#   come from the Portainer stack environment variables. ANALYSIS_API_KEY is
+#   REQUIRED — the engine fails closed (503) without it, and there is no default.
+#
+# The ICT + MSNR V1 strategy, scoring, decision gates and security code are
+# untouched by this file; it is deployment configuration only.
+# =============================================================================
+
+services:
+  crypto-ai-postgres:
+    image: postgres:16-alpine
+    container_name: crypto-ai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-crypto_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-crypto_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the Portainer stack environment}
+    volumes:
+      - crypto_ai_postgres_data:/var/lib/postgresql/data
+    # DELIBERATELY no `ports:` block. This database is private to the stack and
+    # is reached only as host `crypto-ai-postgres` on port 5432 from inside
+    # crypto-ai-network. Publishing it would expose it to the internet.
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crypto_ai} -d ${POSTGRES_DB:-crypto_ai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - crypto-ai-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  crypto-ai-api:
+    build: .
+    image: crypto-ai-api:latest
+    container_name: crypto-ai-api
+    restart: unless-stopped
+    depends_on:
+      crypto-ai-postgres:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      # Points at the NEW database over the stack's private network.
+      # Expected form: postgresql://crypto_ai:<password>@crypto-ai-postgres:5432/crypto_ai
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set and must point at crypto-ai-postgres:5432/crypto_ai}
+      # REQUIRED. Shared server-to-server credential; the same value goes into
+      # Vercel as a server-only variable. The engine rejects every analysis
+      # request without it (503/401/403). No fallback, never logged.
+      - ANALYSIS_API_KEY=${ANALYSIS_API_KEY:?ANALYSIS_API_KEY must be set — the engine refuses anonymous requests}
+      # CORS only. NOT authentication; ignored by server-to-server callers.
+      # NOTE: the engine DROPS a "*" value and logs a critical warning. Set this
+      # to your Vercel site origin once the frontend domain exists.
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - API_HOST=${API_HOST:-0.0.0.0}
+      - API_PORT=8000
+      - API_WORKERS=${API_WORKERS:-2}
+      - ZENTRY_CONFIG=${ZENTRY_CONFIG:-config/config.json}
+      # Optional: leave blank to offer crypto only (this product is crypto-only).
+      - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY:-}
+    # Host 8010 -> container 8000. Never map host 8000 (the OLD engine owns it).
+    ports:
+      - "${CRYPTO_AI_HOST_PORT:-8010}:8000"
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    volumes:
+      - crypto_ai_logs:/app/logs
+    networks:
+      - crypto-ai-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  crypto-ai-network:
+    name: crypto-ai-network
+    driver: bridge
+
+volumes:
+  crypto_ai_postgres_data:
+    name: crypto_ai_postgres_data
+  crypto_ai_logs:
+    name: crypto_ai_logs
