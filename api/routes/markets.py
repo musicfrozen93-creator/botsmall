@@ -1,0 +1,106 @@
+"""Discovery endpoints — what this service can analyse.
+
+The frontend uses these to populate the market / pair / timeframe selectors, so
+the dashboard never hardcodes a symbol list.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from analysis.modules import DEFAULT_PRESET, describe_modules, describe_presets
+from analysis.strategies import DEFAULT_STRATEGY_ID, describe_strategies
+from api.dependencies import get_settings
+from api.schemas import (
+    ErrorResponse,
+    IndicatorModel,
+    IndicatorsResponse,
+    MarketsResponse,
+    PresetModel,
+    ProviderModel,
+    StrategyModel,
+    SymbolsResponse,
+)
+from config.settings import Settings
+from providers.registry import (
+    UnknownProviderError,
+    available_markets,
+    describe_providers,
+    get_provider,
+)
+
+router = APIRouter(tags=['discovery'])
+
+
+@router.get(
+    '/markets',
+    response_model=MarketsResponse,
+    summary='List every registered market and provider',
+)
+def list_markets(settings: Settings = Depends(get_settings)) -> MarketsResponse:
+    """Registered markets and the providers serving each.
+
+    Does not touch the network: capability metadata only.
+    """
+    return MarketsResponse(
+        markets=available_markets(),
+        providers=[ProviderModel(**p) for p in describe_providers()],
+    )
+
+
+@router.get(
+    '/indicators',
+    response_model=IndicatorsResponse,
+    summary='List every analysis module the engine supports',
+)
+def list_indicators() -> IndicatorsResponse:
+    """The analysis-module registry, for the Analyze page's configuration UI.
+
+    The single source of truth for which indicators exist. The frontend renders
+    this list and never invents indicators of its own. `required` modules cannot
+    be disabled; the rest are user-configurable.
+    """
+    return IndicatorsResponse(
+        indicators=[IndicatorModel(**m) for m in describe_modules()],
+        presets=[PresetModel(**p) for p in describe_presets()],
+        default_preset=DEFAULT_PRESET,
+        strategies=[StrategyModel(**s) for s in describe_strategies()],
+        default_strategy=DEFAULT_STRATEGY_ID,
+    )
+
+
+@router.get(
+    '/markets/{market}/symbols',
+    response_model=SymbolsResponse,
+    summary='List every symbol a market offers',
+    responses={
+        400: {'model': ErrorResponse, 'description': 'Unknown market or provider'},
+        503: {'model': ErrorResponse, 'description': 'Market data unavailable'},
+    },
+)
+def list_symbols(
+    market: str,
+    provider: str | None = Query(default=None, description='Optional provider override'),
+    settings: Settings = Depends(get_settings),
+) -> SymbolsResponse:
+    """Every symbol and timeframe available for a market."""
+    try:
+        instance = get_provider(settings, market, provider)
+    except UnknownProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f'Market data provider unavailable: {exc}',
+        ) from exc
+
+    symbols = instance.list_symbols()
+    return SymbolsResponse(
+        market=instance.market,
+        provider=instance.name,
+        timeframes=list(instance.supported_timeframes()),
+        symbols=symbols,
+        count=len(symbols),
+    )
