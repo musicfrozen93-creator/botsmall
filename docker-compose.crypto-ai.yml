@@ -12,10 +12,16 @@
 #   volumes    : crypto_ai_postgres_data, crypto_ai_logs
 #
 # PORTS
-#   PostgreSQL : NO host port published — reachable only inside crypto-ai-network.
-#                (Host 5432 stays owned by the OLD Zentry database container.)
 #   FastAPI    : host 8010 -> container 8000  (host 8000 stays owned by the OLD
 #                analysis API container). The engine listens on 8000 inside.
+#   PostgreSQL : host 55433 -> container 5432  (OPTION A). Published because the
+#                website runs on Vercel and cannot reach a private Docker
+#                network. Host 5432 stays owned by the OLD Zentry database and
+#                55432 by AIGuruthuma — neither is touched.
+#                ** This puts the database on the public internet. The firewall
+#                   rule + TLS steps in the deployment report are REQUIRED. **
+#                The API itself does NOT use the host port; it connects over the
+#                private network to crypto-ai-postgres:5432.
 #
 # SECRETS
 #   No secret is hardcoded. POSTGRES_PASSWORD, DATABASE_URL and ANALYSIS_API_KEY
@@ -37,9 +43,27 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the Portainer stack environment}
     volumes:
       - crypto_ai_postgres_data:/var/lib/postgresql/data
-    # DELIBERATELY no `ports:` block. This database is private to the stack and
-    # is reached only as host `crypto-ai-postgres` on port 5432 from inside
-    # crypto-ai-network. Publishing it would expose it to the internet.
+      # TLS (STRONGLY RECOMMENDED before the website connects from Vercel).
+      # Uncomment and point at real cert/key files on the VPS, then enable the
+      # `command:` block below. Files must be owned by uid 70 (alpine postgres)
+      # and the key chmod 600, or PostgreSQL refuses to start.
+      # - /path/on/vps/server.crt:/var/lib/postgresql/server.crt:ro
+      # - /path/on/vps/server.key:/var/lib/postgresql/server.key:ro
+    # command:
+    #   - -c
+    #   - ssl=on
+    #   - -c
+    #   - ssl_cert_file=/var/lib/postgresql/server.crt
+    #   - -c
+    #   - ssl_key_file=/var/lib/postgresql/server.key
+    #
+    # HOST PORT — OPTION A. Published so the Vercel website (which is external
+    # and cannot reach a private Docker network) can connect. 55433 is used
+    # because host 5432 belongs to the OLD Zentry database and 55432 to
+    # AIGuruthuma. This makes the database reachable from the internet: the
+    # firewall rule and TLS notes in the deployment report are NOT optional.
+    ports:
+      - "${CRYPTO_AI_DB_HOST_PORT:-55433}:5432"
     expose:
       - "5432"
     healthcheck:
